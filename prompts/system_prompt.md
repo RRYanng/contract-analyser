@@ -1,32 +1,28 @@
 # Contract Analyser — System Prompt Architecture
 
-This document walks through the Claude prompts that power Contract Analyser, with the design rationale behind each one.
+This document walks through the Claude prompts that power Contract Analyser, with the reasoning behind how they're structured.
 
-Contract Analyser does not use a single monolithic system prompt. The analysis pipeline is **decomposed into six narrow prompts**, each with its own structured JSON schema, plus one conversational system prompt for follow-ups. Each prompt corresponds to a user-facing module in the [PRD](../docs/PRD.md).
+Contract Analyser uses **six narrow prompts** plus one conversational system prompt, rather than a single monolithic prompt. Each of the six corresponds to a user-facing module in the [PRD](../docs/PRD.md).
 
-## Why decompose into multiple prompts instead of one big one
+## Why multiple prompts instead of one
 
-Early iterations used a single mega-prompt asking Claude to produce the entire risk report in one JSON object. It failed in two predictable ways:
+A few reasons I structured it this way from the start:
 
-1. **Reasoning dilution** — asking the model to simultaneously extract metadata, score 8 risk dimensions, analyse clauses, write scenarios, and generate a checklist meant every section got 1/N of the model's attention. Clause analysis was especially shallow.
-2. **Schema drift** — the larger the output schema, the more often the model dropped fields or broke valid JSON.
+1. **Different modules have different output shapes.** Each has its own JSON schema, and keeping schemas small makes it easier to keep outputs valid across many contracts.
+2. **Different modules benefit from different models.** Analysis modules (1–4, 6) use Opus where reasoning depth pays off. The follow-up chat (Module 7) uses Sonnet where latency and cost dominate the UX. This split is only possible when the prompts are separate calls.
+3. **It's easier to iterate on one module at a time.** If the risk dashboard is off, I can fix Module 2 without regression-testing the whole pipeline.
 
-Decomposing fixed both. Each prompt now has one job, one schema, and one success criterion. The trade-off is latency (6 sequential-ish calls instead of 1), which is acceptable because the UI renders the overview and dashboard first while the deeper analyses stream in.
-
-Also: **Opus is used for analysis passes** (where reasoning depth pays off), **Sonnet is used for the follow-up chat** (where latency and cost dominate the UX). This split is only possible because the pipeline is decomposed.
+The cost is that producing a full report involves several API calls, but the UI is designed to stream — the overview and dashboard render first while Module 3 and 4 are still in flight.
 
 ---
 
 ## Module 1 — Contract Overview
 
-### Why this prompt exists
-The user needs orientation in under 30 seconds. Before anything else, we want to answer: *what am I looking at?* — contract type, both parties, what it's for, payment, duration, and the three things that should be on the user's radar. This runs first so the UI has something to render immediately while heavier analyses are still in flight.
+**What it does:** Extracts basic facts about the contract — type, parties, purpose, payment, duration, and the three things the user should pay attention to.
 
-### Why it's narrow
-This prompt is deliberately **extraction-heavy, not reasoning-heavy**. It asks the model to read and surface facts, not to evaluate. Keeping it a pure extraction task makes it fast, cheap, and reliable. Risk judgment is deferred to Modules 2 and 3 where it belongs.
+**Why it's just extraction:** This runs first, before any risk scoring. Keeping it a pure extraction task (no evaluation) makes it fast and cheap, and means the user sees something useful in the UI within a few seconds. Risk judgment is deferred to Modules 2 and 3.
 
-### Why `top_concerns` is limited to 3
-Users facing a contract already feel overwhelmed. An unordered list of 12 concerns is worse than no list. Three forces prioritisation and gives the user a scannable anchor.
+**Why `top_concerns` is capped at 3:** A long list of concerns on first screen is overwhelming. Three feels like a short enough list that the user will actually read them.
 
 ```text
 You are a contract analysis expert specializing in US business law.
@@ -59,16 +55,15 @@ CONTRACT TEXT:
 
 ## Module 2 — Risk Score Dashboard
 
-### Why a fixed 8-dimension frame
-The model is explicitly told to evaluate **exactly 8 dimensions, in this order, every time**. This is the single most important design decision in the entire prompt architecture.
+**What it does:** Scores the contract across a fixed set of 8 risk dimensions.
 
-A flexible "identify the risks you see" prompt would produce different categories for every contract, making the dashboard incoherent across sessions. The 8 dimensions were chosen because they are the framework where real lawyers evaluate vendor-side contracts: party identification, payment, breach & liability, IP, confidentiality/non-compete, termination, force majeure, dispute resolution. Fixing the frame turns "AI reads your contract" into a **repeatable, comparable, product-y output**.
+**Why the 8 dimensions are fixed and always evaluated in the same order:** This is probably the most important design decision in the whole pipeline. If the model were free to "identify whatever risks it sees," the categories would be different for every contract, and the dashboard would be incoherent across sessions. Fixing the 8 dimensions makes the output comparable and gives the UI a stable structure to render against.
 
-### Why `quoted_clause` is mandatory
-The schema requires a verbatim quote from the contract (or the explicit string `"No relevant clause found"`). This is a **hallucination guardrail**: if the model says payment terms are high-risk, it must show me the payment clause. If it can't find one, it has to say so. The UI uses this to link back to the exact passage in the contract view.
+The 8 dimensions I picked are the ones that come up most often in vendor-side contract review: party identification, payment, breach & liability, IP, confidentiality/non-compete, termination, force majeure, dispute resolution.
 
-### Why `low/medium/high` instead of a numeric score
-A score of 7.3/10 looks precise but isn't defensible — the model can't actually calibrate to decimal points. Three levels are honest about the model's resolution and map cleanly to UI affordances (green/yellow/red) and to user action (ignore / understand / push back).
+**Why each risk must include a `quoted_clause`:** The schema forces the model to paste the verbatim clause it's basing the assessment on (or explicitly say "No relevant clause found"). This is a hallucination check — if the model claims payment terms are risky, I want to see the payment clause it's looking at. The UI also uses this quote to link the user back to the exact part of the contract.
+
+**Why three levels (low/medium/high) instead of a numeric score:** A 10-point score looks precise but the model can't actually calibrate to that precision. Three levels are more honest and map cleanly onto what the user should do with the information: ignore (green), read (yellow), push back (red).
 
 ```text
 You are a contract risk analyst specializing in US business contracts.
@@ -112,20 +107,15 @@ CONTRACT TEXT:
 
 ## Module 3 — Clause-by-Clause Analysis
 
-### Why vendor-perspective framing is baked into the prompt
-The prompt opens with: *"Analyze Party B's perspective throughout."* This is not a minor stylistic choice. Most generic legal-analysis prompts produce neutral output — "here are the risks to both parties." That's useless to our actual user, who **is Party B** and is usually the weaker negotiating side. Forcing the vendor frame at the prompt level is what differentiates this tool from a ChatGPT session.
+**What it does:** Picks out medium/high risk clauses and explains each one in plain English, with a suggested rewrite and a talking point for negotiation.
 
-### Why low-risk clauses are excluded
-The schema only returns medium and high risk clauses. Including low-risk clauses would produce a wall of text that dilutes the actually-dangerous items. This is a **noise reduction** decision — the user came to find out what to push back on, not to read commentary on every boilerplate indemnity clause.
+**Why the vendor perspective is baked into the prompt:** The prompt opens with "Analyze Party B's perspective throughout." A generic legal prompt produces balanced "risks to both sides" output, which isn't actually useful to the person I'm building this for — the user almost always *is* Party B and is usually the weaker negotiating side. Forcing the vendor frame at the prompt level is the main thing that separates this from a generic ChatGPT session.
 
-### Why every clause must include a `negotiation_talking_point`
-The PRD principle "action over information" manifests here. It's not enough to tell the user a clause is dangerous — they have to walk into a meeting on Tuesday knowing what words to say. Generating the talking point at analysis time (rather than asking the user to reverse-engineer one from the risk) is what converts anxiety into action.
+**Why low-risk clauses are excluded:** The user is here to find out what to push back on, not to read commentary on every boilerplate clause. Including low-risk items would bury the ones that actually matter.
 
-### Why `suggested_revision` must be "realistic"
-Earlier iterations produced maximally aggressive rewrites that clients would never accept. Those are strategically useless — they just terminate the negotiation. The current prompt implicitly expects balanced language by coupling the revision with a `negotiation_talking_point` — if the rewrite is extreme, the talking point can't be professional and firm without sounding absurd. This linkage forces realism.
+**Why each clause must include a `negotiation_talking_point`:** The whole point of the product is that the user walks into a meeting knowing what to say. Telling them "this clause is dangerous" without giving them actual words to use leaves the useful work undone.
 
-### Why `must_change: true/false`
-Forces the model to distinguish red-line items from nice-to-haves. In the UI this drives the 3-bucket checklist in Module 6.
+**Why `must_change: true/false`:** This distinguishes red-line items (can't sign as written) from nice-to-haves (would prefer this but could live without it). The checklist in Module 6 uses this to build the 3-bucket action list.
 
 ```text
 You are a contract advisor helping a non-lawyer understand a contract. Analyze Party B's perspective throughout.
@@ -163,14 +153,13 @@ CONTRACT TEXT:
 
 ## Module 4 — Extreme Scenario Playbook
 
-### Why scenario-based rather than clause-based
-Scenarios map onto how users actually think — not "what does clause 7.3 say" but "what happens if my client doesn't pay." The clause analysis in Module 3 is a legal frame; the scenario playbook is an emotional and practical frame. Both are needed. Losing either makes the product feel either too clinical or too vague.
+**What it does:** Generates 4–6 realistic "what if this goes wrong" scenarios specific to this contract, with the user's exposure and recommended action for each.
 
-### Why only scenarios "relevant to THIS contract"
-The prompt explicitly forbids generic scenarios — "only include scenarios that are relevant to THIS contract." Without this constraint, the model defaults to generic risk-management templates that aren't grounded in the user's actual document. The quality difference between a scenario anchored to a specific clause vs. a generic one is enormous.
+**Why scenarios instead of more clause analysis:** The clause analysis in Module 3 is organized the way a lawyer thinks (clause-by-clause). The scenario playbook is organized the way a user thinks ("what if my client doesn't pay?"). I felt the product needed both — without the scenarios, the output feels too clinical; without the clause analysis, it feels too vague.
 
-### Why `protection_level` is separate from `recommendation`
-These are two different questions: *how well does the contract currently protect you here* vs. *what should you do about it*. Conflating them produces either fatalism ("you're exposed, good luck") or false confidence ("you're protected, no action needed"). Splitting them forces the model to be precise and gives the user both a current-state reading and a forward action.
+**Why the prompt forces scenarios to be "relevant to THIS contract":** Without this constraint, the model defaults to generic risk-management templates. The value is in scenarios anchored to the user's actual document.
+
+**Why `protection_level` and `recommendation` are separate fields:** These answer two different questions — how well the current contract protects you here, versus what you should do about it. Combining them would produce either fatalism ("you're exposed, good luck") or false reassurance ("you're fine, no action"). Splitting them lets the model be precise on both.
 
 ```text
 You are a contract risk advisor. Based on this contract, generate realistic worst-case scenarios that the reviewing party (Party B) should consider.
@@ -208,14 +197,13 @@ CONTRACT TEXT:
 
 ## Module 6 — Pre-Signing Checklist
 
-### Why the checklist is its own prompt
-The checklist is downstream of the clause and scenario analyses — in principle it could be derived deterministically from them. But asking the model to re-read the full contract alongside the risk summary lets it catch **cross-cutting items** that no individual clause analysis would surface (e.g., "no lawyer review contemplated for a $50k contract" — that's a checklist item, not a clause issue).
+**What it does:** Generates a prioritized checklist of things the user should verify or act on before signing.
 
-### Why three priority levels (critical / recommended / optional)
-Matches how humans actually prioritise: red-lines, nice-to-haves, and background checks. A flat to-do list of 12 items gets skimmed and discarded. Tiering it makes the "critical" section feel like a genuine short list worth acting on.
+**Why the checklist is its own prompt rather than assembled from earlier outputs:** In principle I could derive it from the previous modules, but giving the model the contract again alongside the risk summary lets it catch cross-cutting items that don't belong to any one clause — for example, "consider having a lawyer review this given the dollar value," which isn't a clause issue at all.
 
-### Why `status: needs_action | acceptable | not_applicable`
-So the UI can render the checklist as a genuine checkable list — items already satisfied by the contract get a green check, items needing action get an empty box. This turns the output from "read me" into "work through me."
+**Why three priority levels (critical / recommended / optional):** A flat list of 12 to-dos gets skimmed. Splitting into tiers makes the "critical" section feel like a genuine short list worth acting on.
+
+**Why the `status` field exists:** It lets the UI render the output as an actual checkable list — items already satisfied by the contract show as done, items needing action show as open. This turns a block of text into something the user can work through.
 
 ```text
 Based on the full contract analysis, generate a pre-signing checklist for Party B.
@@ -251,19 +239,15 @@ RISK ANALYSIS SUMMARY:
 
 ---
 
-## Module 7 — Follow-Up Conversation (true system prompt)
+## Module 7 — Follow-Up Conversation
 
-### Why this is the only "true" system prompt
-All five prompts above are structured extraction prompts — they produce JSON and are called once each. This one is an actual persistent system prompt for a multi-turn conversation, where the contract text stays in context across every message the user sends.
+**What it does:** Handles the multi-turn chat after the initial report. This is the only "true" system prompt in the project — all the others are one-shot structured extraction tasks.
 
-### Why "reference specific contract language when relevant" is an explicit instruction
-Without it, the model drifts into generic legal advice ("typically in service contracts, you'd want to..."). With it, every answer is anchored to the user's actual document. The difference between "this is what this kind of contract usually says" and "*your* clause 4.2 says..." is the difference between a useful session and a replaceable one.
+**Why the prompt tells the model to reference specific contract language:** Without this instruction, the model drifts into generic legal advice ("typically in service contracts, you'd want…"). With it, every answer is anchored to the user's actual document. The useful product is the one that answers about *your* contract, not contracts in general.
 
-### Why the response is capped at 2–4 short paragraphs
-Users asking follow-up questions are exploring, not reading a report. Long responses get skimmed. Capping length forces the model to respect the conversational medium — give me the answer, not a lecture.
+**Why responses are capped at 2–4 paragraphs:** Users asking follow-ups are exploring, not reading a report. Long responses get skimmed or ignored.
 
-### Why the disclaimer is triggered "for high-stakes questions" specifically
-Putting the disclaimer on every single response trains users to ignore it. Reserving it for genuinely high-stakes moments (large dollar contracts, termination disputes, liability exposure) makes it land when it matters. This is a small detail but reflects the PRD principle of "honest about limitations" without being performatively cautious.
+**Why the disclaimer is only surfaced for high-stakes questions:** If every response ends with "this is not legal advice," users stop noticing it. Keeping it for the questions where it actually matters (big dollar amounts, termination fights, liability exposure) makes it more likely to land.
 
 ```text
 You are Contract Analyser, an AI contract advisor helping a non-lawyer understand and evaluate a US business contract. You have already analyzed the full contract and are now answering follow-up questions.
@@ -282,13 +266,13 @@ CONTRACT TEXT:
 
 ---
 
-## Closing note on prompt evolution
+## What I took away from writing these
 
-Every prompt in this file went through at least three iterations on real contracts. The patterns above — fixed dimensions, mandatory citations, vendor framing, three-level categories, action-over-information — are not abstract design principles. They emerged from watching the model fail in specific, reproducible ways and then encoding the fix into the prompt.
+The structure of the output ended up mattering more than the wording of the instructions. Deciding to use three risk levels instead of a 10-point score, or forcing a quoted clause with every risk claim, or splitting "how protected are you" from "what should you do" — these are the choices that shape what the user ends up thinking when they read the report. I spent more time iterating on the JSON schemas than on the instruction text.
 
-If there's a single lesson: **prompt architecture is product architecture**. The structure of the output directly shapes the user's thinking. Spend at least as much time on the schema as on the instructions.
+I also came away thinking that "prompt engineering" is mostly a misleading name for what's really happening here. Very little of this work was about clever instructions. Most of it was deciding what the output should look like, and then writing the minimum prompt that would produce that shape reliably.
 
 ---
 
 *Source code: [`backend/services/prompts.py`](../backend/services/prompts.py)*
-*Maintained by Ruiyi (Alan) Yang · April 2026*
+*Author: Ruiyi (Alan) Yang · April 2026*
