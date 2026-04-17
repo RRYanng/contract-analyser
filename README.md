@@ -133,7 +133,10 @@ contract/
 └── README.md
 ```
 
-> **Coming soon:** `docs/PRD.md` (full product requirements document) and `prompts/system_prompt.md` (the engineered Claude system prompt) — both currently local, will be published after a final review pass.
+## 📄 Documentation
+
+- [Full Product Requirements Document](./docs/PRD.md) — user personas, feature prioritization, competitive landscape, risks & mitigations. Reflects my end-to-end product thinking on this project.
+- [System Prompt](./prompts/system_prompt.md) — the engineered Claude prompt powering the risk analysis, with design rationale for each section.
 
 ---
 
