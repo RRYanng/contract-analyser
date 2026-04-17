@@ -1,0 +1,47 @@
+# ── Secrets ─────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.key
+*.pem
+credentials.json
+token.json
+
+# ── Claude Code ────────────────────────────────────────
+.claude/
+
+# ── Python ─────────────────────────────────────────────
+backend/venv/
+venv/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ── Node / Next ────────────────────────────────────────
+node_modules/
+.next/
+dist/
+build/
+out/
+.vercel
+*.tsbuildinfo
+
+# ── Supabase ───────────────────────────────────────────
+supabase/.branches/
+supabase/.temp/
+
+# ── OS / IDE ───────────────────────────────────────────
+.DS_Store
+**/.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# ── Logs ───────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
