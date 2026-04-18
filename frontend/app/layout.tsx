@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ContractGuard — AI Contract Risk Analyzer",
+  title: "Contract Analyser — AI Contract Risk Analyzer",
   description:
     "Upload any US business contract. Get a plain-English risk analysis with actionable suggestions.",
 };

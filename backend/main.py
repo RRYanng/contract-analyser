@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import upload, analyze, chat
 
-app = FastAPI(title="ContractGuard API", version="1.0.0")
+app = FastAPI(title="Contract Analyser API", version="1.0.0")
 
 frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
