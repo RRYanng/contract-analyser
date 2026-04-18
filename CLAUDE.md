@@ -1,4 +1,4 @@
-# ContractGuard — AI Contract Risk Analyzer
+# Contract Analyser — AI Contract Risk Analyzer
 
 ## What this project is
 A web app that analyzes US business contracts for risks. Users upload a contract (PDF, DOCX, or text), and the system returns a full risk analysis report with plain English explanations and revision suggestions.
